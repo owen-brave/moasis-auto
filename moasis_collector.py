@@ -2,6 +2,7 @@ import os
 import json
 import time
 import datetime
+import requests
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -11,6 +12,18 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+def get_korean_proxy():
+    """공용 한국 프록시 IP 추출 시도"""
+    try:
+        res = requests.get("https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=3000&country=KR", timeout=5)
+        if res.status_code == 200 and res.text.strip():
+            proxies = res.text.strip().splitlines()
+            if proxies:
+                return proxies[0]
+    except Exception as e:
+        print(f"프록시 추출 참고: {e}")
+    return None
 
 def main():
     print("Google Sheets 연결 중...")
@@ -34,16 +47,23 @@ def main():
     y2, m2, d2 = friday.strftime('%Y'), friday.strftime('%m'), friday.strftime('%d')
     print(f"수집 기간: {y1}-{m1}-{d1} ~ {y2}-{m2}-{d2}")
 
+    # 브라우저 옵션 설정
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--window-size=1920,1080')
     chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    chrome_options.page_load_strategy = 'eager'  # 페이지 리소스가 다 안 불러와져도 빠르게 진행
+    chrome_options.page_load_strategy = 'none'  # 타임아웃 방지를 위한 비동기 로딩
+
+    # 한국 프록시 IP 설정 시도
+    kr_proxy = get_korean_proxy()
+    if kr_proxy:
+        print(f"한국 프록시 IP 사용: {kr_proxy}")
+        chrome_options.add_argument(f'--proxy-server=http://{kr_proxy}')
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    driver.set_page_load_timeout(180)  # 타임아웃 180초로 늘림
+    driver.set_page_load_timeout(60)
     wait = WebDriverWait(driver, 15)
     LOGIN_URL = "https://pub.bookman.kr"
     
@@ -59,9 +79,12 @@ def main():
         print(f"[{idx}/{len(accounts)}] 계정({user_id}) 접속 시도 중...")
 
         try:
-            # 1. 로그인 페이지 접속 및 로그인
-            driver.get(LOGIN_URL)
-            time.sleep(3)
+            # 1. 로그인 페이지 접속
+            try:
+                driver.get(LOGIN_URL)
+            except Exception:
+                pass  # page_load_strategy='none' 상태이므로 타임아웃 무시 후 바로 진행
+            time.sleep(5)
 
             id_input = wait.until(EC.presence_of_element_located((By.NAME, "megagong1")))
             pw_input = driver.find_element(By.NAME, "password")
@@ -106,9 +129,9 @@ def main():
                     date_inputs[4].clear(); date_inputs[4].send_keys(m2)
                     date_inputs[5].clear(); date_inputs[5].send_keys(d2)
             except Exception as e:
-                print(f"[{user_id}] 날짜 입력 중 경고: {e}")
+                print(f"[{user_id}] 날짜 입력 경고: {e}")
 
-            # 6. '조회하기' 클릭
+            # 6. '조회' 클릭
             try:
                 search_btn = driver.find_element(By.XPATH, "//*[contains(text(), '조회') or contains(@src, 'btn_search')]")
                 search_btn.click()
@@ -116,7 +139,7 @@ def main():
             except Exception as e:
                 print(f"[{user_id}] 조회 버튼 클릭 실패: {e}")
 
-            # 7. 다중 페이지 수집
+            # 7. 다중 페이지 데이터 수집
             account_data_count = 0
             page_num = 1
 
@@ -129,7 +152,6 @@ def main():
                         all_collected_data.append(row_data)
                         account_data_count += 1
 
-                # 다음페이지 이동
                 try:
                     next_btns = driver.find_elements(By.XPATH, "//*[contains(text(), '다음페이지') or contains(text(), '▶')]")
                     clickable_next = None
@@ -151,8 +173,11 @@ def main():
             driver.switch_to.default_content()
 
         except Exception as e:
-            print(f"[{user_id}] 계정 처리 중 에러/타임아웃 발생: {e}")
-            driver.switch_to.default_content()
+            print(f"[{user_id}] 계정 처리 중 오류: {e}")
+            try:
+                driver.switch_to.default_content()
+            except Exception:
+                pass
             continue
 
     driver.quit()
