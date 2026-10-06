@@ -7,11 +7,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 def main():
-    # 1. Google Sheets API 연동
     print("Google Sheets 연결 중...")
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     json_creds = json.loads(os.environ['GOOGLE_CREDENTIALS_JSON'])
@@ -21,20 +22,18 @@ def main():
     doc = client.open("출판 주간 매출 보고")
     raw_sheet = doc.worksheet("RAW_DATA")
 
-    # 2. 모아시스 계정 정보 로드
     accounts = json.loads(os.environ['MOASIS_ACCOUNTS'])
     print(f"총 {len(accounts)}개 계정 수집을 시작합니다.")
 
-    # 3. 날짜 계산 (월요일 ~ 금요일)
+    # 날짜 계산 (월요일 ~ 금요일)
     today = datetime.date.today()
     monday = today - datetime.timedelta(days=today.weekday())
     friday = monday + datetime.timedelta(days=4)
     
-    date_from = monday.strftime('%Y-%m-%d')
-    date_to = friday.strftime('%Y-%m-%d')
-    print(f"수집 대상 기간: {date_from} ~ {date_to}")
+    y1, m1, d1 = monday.strftime('%Y'), monday.strftime('%m'), monday.strftime('%d')
+    y2, m2, d2 = friday.strftime('%Y'), friday.strftime('%m'), friday.strftime('%d')
+    print(f"수집 기간: {y1}-{m1}-{d1} ~ {y2}-{m2}-{d2}")
 
-    # 4. 가상 브라우저(Headless Chrome) 설정
     chrome_options = Options()
     chrome_options.add_argument('--headless')
     chrome_options.add_argument('--no-sandbox')
@@ -42,8 +41,9 @@ def main():
     chrome_options.add_argument('--window-size=1920,1080')
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    
+    wait = WebDriverWait(driver, 10)
     LOGIN_URL = "https://pub.bookman.kr"
+    
     all_collected_data = []
 
     try:
@@ -51,40 +51,113 @@ def main():
             user_id = acc.get('id', '')
             user_pw = acc.get('pw', '')
 
-            if not user_id or not user_pw or user_id.startswith("첫번째"):
-                print(f"[{idx}] 계정 정보가 올바르게 입력되지 않아 스킵합니다.")
+            if not user_id or not user_pw:
                 continue
 
-            print(f"[{idx}/{len(accounts)}] {user_id} 계정 접속 중...")
+            print(f"[{idx}/{len(accounts)}] 계정({user_id}) 로그인 중...")
             driver.get(LOGIN_URL)
             time.sleep(2)
 
-            # 로그인 정보 입력
+            # 1. 로그인
             id_input = driver.find_element(By.NAME, "megagong1")
             pw_input = driver.find_element(By.NAME, "password")
-            
             id_input.clear()
             id_input.send_keys(user_id)
             pw_input.clear()
             pw_input.send_keys(user_pw)
 
-            # 로그인 버튼 클릭
             login_btn = driver.find_element(By.XPATH, "//img[contains(@src, 'btn_login') or contains(@alt, '로그인')]")
             login_btn.click()
             time.sleep(3)
 
-            print(f"[{user_id}] 로그인 완료 및 출고 데이터 조회 시작...")
+            # 2. MENU 버튼 클릭
+            try:
+                menu_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'MENU')]")))
+                menu_btn.click()
+                time.sleep(1.5)
+            except Exception:
+                pass
+
+            # 3. '기간별 매출현황' 메뉴 클릭
+            try:
+                sales_menu = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '기간별 매출현황')]")))
+                sales_menu.click()
+                time.sleep(2)
+            except Exception as e:
+                print(f"[{user_id}] 메뉴 클릭 실패: {e}")
+                continue
+
+            # 4. 프레임/iFrame 전환
+            if len(driver.find_elements(By.TAG_NAME, "iframe")) > 0:
+                driver.switch_to.frame(0)
+
+            # 5. 날짜 입력
+            try:
+                date_inputs = driver.find_elements(By.XPATH, "//input[@type='text']")
+                if len(date_inputs) >= 6:
+                    date_inputs[0].clear(); date_inputs[0].send_keys(y1)
+                    date_inputs[1].clear(); date_inputs[1].send_keys(m1)
+                    date_inputs[2].clear(); date_inputs[2].send_keys(d1)
+                    date_inputs[3].clear(); date_inputs[3].send_keys(y2)
+                    date_inputs[4].clear(); date_inputs[4].send_keys(m2)
+                    date_inputs[5].clear(); date_inputs[5].send_keys(d2)
+            except Exception as e:
+                print(f"[{user_id}] 날짜 입력 중 경고: {e}")
+
+            # 6. '조회하기' 클릭
+            try:
+                search_btn = driver.find_element(By.XPATH, "//*[contains(text(), '조회') or contains(@src, 'btn_search')]")
+                search_btn.click()
+                time.sleep(3)
+            except Exception as e:
+                print(f"[{user_id}] 조회 버튼 클릭 실패: {e}")
+
+            # 7. 다중 페이지 데이터 전체 순회 수집
+            account_data_count = 0
+            page_num = 1
+
+            while True:
+                # 현 페이지 테이블 수집
+                rows = driver.find_elements(By.XPATH, "//table//tr")
+                for r in rows:
+                    cols = [c.text.strip() for c in r.find_elements(By.XPATH, "./td|./th")]
+                    if len(cols) >= 5 and cols[0].isdigit():
+                        row_data = [user_id] + cols
+                        all_collected_data.append(row_data)
+                        account_data_count += 1
+
+                # [다음페이지] 또는 '▶' 버튼 찾아서 클릭
+                try:
+                    next_btns = driver.find_elements(By.XPATH, "//*[contains(text(), '다음페이지') or contains(text(), '▶')]")
+                    clickable_next = None
+                    for btn in next_btns:
+                        if btn.is_displayed() and btn.is_enabled():
+                            clickable_next = btn
+                            break
+                    
+                    if clickable_next:
+                        clickable_next.click()
+                        page_num += 1
+                        time.sleep(2)
+                    else:
+                        break
+                except Exception:
+                    break
+
+            print(f"[{user_id}] 총 {page_num}개 페이지에서 데이터 {account_data_count}건 수집 완료")
+            driver.switch_to.default_content()
 
     except Exception as e:
-        print(f"작업 중 오류 발생: {e}")
+        print(f"작업 처리 중 에러: {e}")
     finally:
         driver.quit()
 
+    # 8. 구글 시트 RAW_DATA에 수집 데이터 추가
     if all_collected_data:
         raw_sheet.append_rows(all_collected_data)
-        print(f"성공적으로 {len(all_collected_data)}건의 데이터를 RAW_DATA 시트에 복붙했습니다.")
+        print(f"총 {len(all_collected_data)}건의 데이터가 RAW_DATA 시트에 성공적으로 추가되었습니다!")
     else:
-        print("수집 완료 테스트 단계입니다.")
+        print("조회된 매출 데이터가 없습니다.")
 
 if __name__ == "__main__":
     main()
