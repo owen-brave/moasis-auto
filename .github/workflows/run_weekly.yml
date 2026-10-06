@@ -20,7 +20,7 @@ jobs:
 
       - name: 라이브러리 설치
         run: |
-          pip install gspread oauth2client selenium
+          pip install gspread oauth2client selenium webdriver_manager
 
       - name: 수집 프로그램 실행
         env:
