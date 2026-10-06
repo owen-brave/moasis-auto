@@ -39,27 +39,31 @@ def main():
     chrome_options.add_argument('--no-sandbox')
     chrome_options.add_argument('--disable-dev-shm-usage')
     chrome_options.add_argument('--window-size=1920,1080')
+    chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    chrome_options.page_load_strategy = 'eager'  # 페이지 리소스가 다 안 불러와져도 빠르게 진행
 
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
-    wait = WebDriverWait(driver, 10)
+    driver.set_page_load_timeout(180)  # 타임아웃 180초로 늘림
+    wait = WebDriverWait(driver, 15)
     LOGIN_URL = "https://pub.bookman.kr"
     
     all_collected_data = []
 
-    try:
-        for idx, acc in enumerate(accounts, 1):
-            user_id = acc.get('id', '')
-            user_pw = acc.get('pw', '')
+    for idx, acc in enumerate(accounts, 1):
+        user_id = acc.get('id', '')
+        user_pw = acc.get('pw', '')
 
-            if not user_id or not user_pw:
-                continue
+        if not user_id or not user_pw:
+            continue
 
-            print(f"[{idx}/{len(accounts)}] 계정({user_id}) 로그인 중...")
+        print(f"[{idx}/{len(accounts)}] 계정({user_id}) 접속 시도 중...")
+
+        try:
+            # 1. 로그인 페이지 접속 및 로그인
             driver.get(LOGIN_URL)
-            time.sleep(2)
+            time.sleep(3)
 
-            # 1. 로그인
-            id_input = driver.find_element(By.NAME, "megagong1")
+            id_input = wait.until(EC.presence_of_element_located((By.NAME, "megagong1")))
             pw_input = driver.find_element(By.NAME, "password")
             id_input.clear()
             id_input.send_keys(user_id)
@@ -68,13 +72,13 @@ def main():
 
             login_btn = driver.find_element(By.XPATH, "//img[contains(@src, 'btn_login') or contains(@alt, '로그인')]")
             login_btn.click()
-            time.sleep(3)
+            time.sleep(4)
 
             # 2. MENU 버튼 클릭
             try:
                 menu_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'MENU')]")))
                 menu_btn.click()
-                time.sleep(1.5)
+                time.sleep(2)
             except Exception:
                 pass
 
@@ -82,12 +86,12 @@ def main():
             try:
                 sales_menu = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), '기간별 매출현황')]")))
                 sales_menu.click()
-                time.sleep(2)
+                time.sleep(3)
             except Exception as e:
                 print(f"[{user_id}] 메뉴 클릭 실패: {e}")
                 continue
 
-            # 4. 프레임/iFrame 전환
+            # 4. iFrame 전환
             if len(driver.find_elements(By.TAG_NAME, "iframe")) > 0:
                 driver.switch_to.frame(0)
 
@@ -108,16 +112,15 @@ def main():
             try:
                 search_btn = driver.find_element(By.XPATH, "//*[contains(text(), '조회') or contains(@src, 'btn_search')]")
                 search_btn.click()
-                time.sleep(3)
+                time.sleep(4)
             except Exception as e:
                 print(f"[{user_id}] 조회 버튼 클릭 실패: {e}")
 
-            # 7. 다중 페이지 데이터 전체 순회 수집
+            # 7. 다중 페이지 수집
             account_data_count = 0
             page_num = 1
 
             while True:
-                # 현 페이지 테이블 수집
                 rows = driver.find_elements(By.XPATH, "//table//tr")
                 for r in rows:
                     cols = [c.text.strip() for c in r.find_elements(By.XPATH, "./td|./th")]
@@ -126,7 +129,7 @@ def main():
                         all_collected_data.append(row_data)
                         account_data_count += 1
 
-                # [다음페이지] 또는 '▶' 버튼 찾아서 클릭
+                # 다음페이지 이동
                 try:
                     next_btns = driver.find_elements(By.XPATH, "//*[contains(text(), '다음페이지') or contains(text(), '▶')]")
                     clickable_next = None
@@ -138,7 +141,7 @@ def main():
                     if clickable_next:
                         clickable_next.click()
                         page_num += 1
-                        time.sleep(2)
+                        time.sleep(3)
                     else:
                         break
                 except Exception:
@@ -147,12 +150,14 @@ def main():
             print(f"[{user_id}] 총 {page_num}개 페이지에서 데이터 {account_data_count}건 수집 완료")
             driver.switch_to.default_content()
 
-    except Exception as e:
-        print(f"작업 처리 중 에러: {e}")
-    finally:
-        driver.quit()
+        except Exception as e:
+            print(f"[{user_id}] 계정 처리 중 에러/타임아웃 발생: {e}")
+            driver.switch_to.default_content()
+            continue
 
-    # 8. 구글 시트 RAW_DATA에 수집 데이터 추가
+    driver.quit()
+
+    # 8. 구글 시트 반영
     if all_collected_data:
         raw_sheet.append_rows(all_collected_data)
         print(f"총 {len(all_collected_data)}건의 데이터가 RAW_DATA 시트에 성공적으로 추가되었습니다!")
